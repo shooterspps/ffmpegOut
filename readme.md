@@ -29,6 +29,13 @@ ffmpegOutを使用したことによる、いかなる損害・トラブルに�
 
 中身をすべてAviutlフォルダにコピーします。
 
+> [!WARNING]
+> Aviutl2では、
+> - exe_filesフォルダをAviutlフォルダの中に、
+> - ```plugins```フォルダの**中身**を全て```C:\ProgramData\aviutl2\Plugin```の中に
+>
+> それぞれコピーしてください。
+
 ![中身のコピー](./data/ffmpegOut_1_00_install_03.png)
 
 更新時には、下記のように上書きするか聞いてくることがあります。
