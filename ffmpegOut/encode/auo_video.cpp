@@ -5,7 +5,7 @@
 //
 // Copyright (c) 2010-2022 rigaya
 //
-// Permission is hereby granted, free of charge, to any person obtaining a copy
+// Permission is hereby granted, free of TCHARge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
 // in the Software without restriction, including without limitation the rights
 // to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
@@ -39,7 +39,7 @@
 #include <vector>
 #include <set>
 
-#include "output.h"
+#include "auo.h"
 #include "vphelp_client.h"
 
 #pragma warning( push )
@@ -47,7 +47,6 @@
 #include "afs_client.h"
 #pragma warning( pop )
 
-#include "auo.h"
 #include "auo_frm.h"
 #include "auo_pipe.h"
 #include "auo_error.h"
@@ -56,15 +55,16 @@
 #include "auo_convert.h"
 #include "auo_system.h"
 #include "auo_version.h"
-#include "auo_chapter.h"
+#include "rgy_chapter.h"
 #include "auo_mes.h"
-#include "auo_options.h"
 
 #include "auo_encode.h"
 #include "auo_video.h"
+#include "auo_audio.h"
 #include "auo_audio_parallel.h"
 #include "cpu_info.h"
 #include "rgy_thread_affinity.h"
+#include "rgy_simd.h"
 
 typedef struct video_output_thread_t {
     CONVERT_CF_DATA *pixel_data;
@@ -76,7 +76,7 @@ typedef struct video_output_thread_t {
     int repeat;
 } video_output_thread_t;
 
-static const char * specify_input_csp(int output_csp) {
+static const TCHAR * specify_input_csp(int output_csp) {
     return specify_csp[output_csp];
 }
 
@@ -84,19 +84,20 @@ int get_aviutl_color_format(int use_highbit, int output_csp) {
     //Aviutlからの入力に使用するフォーマット
     switch (output_csp) {
         case OUT_CSP_P010:
-            return (is_aviutl2()) ? CF_YUY2 : CF_YC48;
+            return CF_YC48;
         case OUT_CSP_YUV444:
         case OUT_CSP_YUV444_16:
-            return (is_aviutl2()) ? CF_RGB : CF_YC48;
+            return (is_aviutl2()) ? CF_PA64 : CF_YC48;
         case OUT_CSP_RGB:
             return CF_RGB;
         case OUT_CSP_RGBA:
-            return (is_aviutl2()) ? CF_RGB : CF_RGBA;
+        case OUT_CSP_RGBA_16:
+            return (is_aviutl2()) ? CF_PA64 : CF_RGBA;
         case OUT_CSP_NV12:
         case OUT_CSP_NV16:
         case OUT_CSP_YUY2:
         default:
-            return (use_highbit) ? ((is_aviutl2()) ? CF_RGB : CF_YC48) : CF_YUY2;
+            return (use_highbit) ? CF_YC48 : CF_YUY2;
     }
 }
 
@@ -104,8 +105,8 @@ static int calc_input_frame_size(int width, int height, int color_format, int& b
     width = (color_format == CF_RGB) ? (width+3) & ~3 : (color_format == CF_RGBA) ? width : (width+1) & ~1;
     //widthが割り切れない場合、多めにアクセスが発生するので、そのぶんを確保しておく
     const DWORD pixel_size = COLORFORMATS[color_format].size;
-    const DWORD simd_check = get_availableSIMD();
-    const DWORD align_size = (simd_check & AUO_SIMD_SSE2) ? ((simd_check & AUO_SIMD_AVX2) ? 64 : 32) : 1;
+    const auto simd_check = get_availableSIMD();
+    const DWORD align_size = ((simd_check & RGY_SIMD::SSE2) != RGY_SIMD::NONE) ? (((simd_check & RGY_SIMD::AVX2) != RGY_SIMD::NONE) ? 64 : 32) : 1;
 #define ALIGN_NEXT(i, align) (((i) + (align-1)) & (~(align-1))) //alignは2の累乗(1,2,4,8,16,32...)
     buf_size = ALIGN_NEXT(width * height * pixel_size + (ALIGN_NEXT(width, align_size / pixel_size) - width) * 2 * pixel_size, align_size);
 #undef ALIGN_NEXT
@@ -129,7 +130,7 @@ BOOL setup_afsvideo(const OUTPUT_INFO *oip, const SYSTEM_DATA *sys_dat, CONF_GUI
         warning_auto_afs_disable();
         conf->vid.afs = FALSE;
         //再度使用するmuxerをチェックする
-        pe->muxer_to_be_used = check_muxer_to_be_used(conf, pe->video_out_type, (oip->flag & OUTPUT_INFO_FLAG_AUDIO) != 0);
+        pe->muxer_to_be_used = check_muxer_to_be_used(conf, pe, sys_dat, pe->temp_filename, pe->video_out_type, (oip->flag & OUTPUT_INFO_FLAG_AUDIO) != 0);
         return TRUE;
     }
     //エラー
@@ -148,7 +149,7 @@ void close_afsvideo(PRM_ENC *pe) {
 
 static AUO_RESULT tcfile_out(int *jitter, int frame_n, double fps, BOOL afs, const PRM_ENC *pe) {
     AUO_RESULT ret = AUO_RESULT_SUCCESS;
-    char auotcfile[MAX_PATH_LEN];
+    TCHAR auotcfile[MAX_PATH_LEN];
     FILE *tcfile = NULL;
 
     if (afs)
@@ -158,7 +159,7 @@ static AUO_RESULT tcfile_out(int *jitter, int frame_n, double fps, BOOL afs, con
     //ファイル名作成
     apply_appendix(auotcfile, _countof(auotcfile), pe->temp_filename, pe->append.tc);
 
-    if (NULL != fopen_s(&tcfile, auotcfile, "wb")) {
+    if (NULL != _tfopen_s(&tcfile, auotcfile, _T("wb"))) {
         ret |= AUO_RESULT_ERROR; warning_auo_tcfile_failed();
     } else {
         fprintf(tcfile, "# timecode format v2\r\n");
@@ -187,63 +188,63 @@ static AUO_RESULT tcfile_out(int *jitter, int frame_n, double fps, BOOL afs, con
 }
 
 //cmdexのうち、guiから発行されるオプションとの衝突をチェックして、読み取られなかったコマンドを追加する
-static void append_cmdex(char *cmd, size_t nSize, const char *cmdex) {
-    const size_t cmd_len = strlen(cmd);
+static void append_cmdex(TCHAR *cmd, size_t nSize, const TCHAR *cmdex) {
+    const size_t cmd_len = _tcslen(cmd);
 
-    sprintf_s(cmd + cmd_len, nSize - cmd_len, " %s", cmdex);
+    _stprintf_s(cmd + cmd_len, nSize - cmd_len, _T(" %s"), cmdex);
 
     //改行のチェックのみ行う
     replace_cmd_CRLF_to_Space(cmd + cmd_len + 1, nSize - cmd_len - 1);
 }
 
-static void build_full_cmd(char *cmd, size_t nSize, const CONF_GUIEX *conf, const OUTPUT_INFO *oip, const PRM_ENC *pe, const SYSTEM_DATA *sys_dat, const char *input) {
+static void build_full_cmd(TCHAR *cmd, size_t nSize, const CONF_GUIEX *conf, const OUTPUT_INFO *oip, const PRM_ENC *pe, const SYSTEM_DATA *sys_dat, const TCHAR *input) {
     CONF_GUIEX prm;
     memcpy(&prm, conf, sizeof(CONF_GUIEX));
     //共通置換を実行
-    cmd_replace(prm.vid.cmdex, sizeof(prm.vid.cmdex), pe, sys_dat, conf, oip);
-    cmd_replace(prm.vid.incmd, sizeof(prm.vid.incmd), pe, sys_dat, conf, oip);
+    cmd_replace(prm.vid.cmdex, _countof(prm.vid.cmdex), pe, sys_dat, conf, oip);
+    cmd_replace(prm.enc.incmd, _countof(prm.enc.incmd), pe, sys_dat, conf, oip);
     //コマンドライン作成
-    strcpy_s(cmd, nSize, " -y");
+    _tcscpy_s(cmd, nSize, _T(" -y"));
     //入力追加オプション
-    if (strlen(prm.vid.incmd) > 0) sprintf_s(cmd + strlen(cmd), nSize - strlen(cmd), " %s", prm.vid.incmd);
+    if (_tcslen(prm.enc.incmd) > 0) _stprintf_s(cmd + _tcslen(cmd), nSize - _tcslen(cmd), _T(" %s"), prm.enc.incmd);
     //入力フォーマット
-    strcpy_s(cmd + strlen(cmd), nSize - strlen(cmd), " -f rawvideo");
+    _tcscpy_s(cmd + _tcslen(cmd), nSize - _tcslen(cmd), _T(" -f rawvideo"));
     //解像度情報追加(-s)
-    if (strcmp(input, PIPE_FN) == NULL)
-        sprintf_s(cmd + strlen(cmd), nSize - strlen(cmd), " -s %dx%d", oip->w, oip->h);
+    if (_tcscmp(input, PIPE_FN) == NULL)
+        _stprintf_s(cmd + _tcslen(cmd), nSize - _tcslen(cmd), _T(" -s %dx%d"), oip->w, oip->h);
     //rawの形式情報追加
-    sprintf_s(cmd + strlen(cmd), nSize - strlen(cmd), " -pix_fmt %s", specify_input_csp(prm.enc.output_csp));
+    _stprintf_s(cmd + _tcslen(cmd), nSize - _tcslen(cmd), _T(" -pix_fmt %s"), specify_input_csp(prm.enc.output_csp));
     //fps
-    int gcd = get_gcd(oip->rate, oip->scale);
-    sprintf_s(cmd + strlen(cmd), nSize - strlen(cmd), " -r %d/%d", oip->rate / gcd, oip->scale / gcd);
+    int gcd = rgy_gcd(oip->rate, oip->scale);
+    _stprintf_s(cmd + _tcslen(cmd), nSize - _tcslen(cmd), _T(" -r %d/%d"), oip->rate / gcd, oip->scale / gcd);
     //入力ファイル
-    sprintf_s(cmd + strlen(cmd), nSize - strlen(cmd), " -i \"%s\"", input);
+    _stprintf_s(cmd + _tcslen(cmd), nSize - _tcslen(cmd), _T(" -i \"%s\""), input);
     //音声入力
     if ((oip->flag & OUTPUT_INFO_FLAG_AUDIO) && conf->enc.audio_input) {
-        if (!(conf->enc.use_auto_npass && pe->current_x264_pass == 1)) {
+        if (!(conf->enc.use_auto_npass && pe->current_pass == 1)) {
             if (conf->aud.use_internal) {
                 if_valid_wait_for_single_object(pe->aud_parallel.he_vid_start, INFINITE);
                 for (int i_aud = 0; i_aud < pe->aud_count; i_aud++) {
-                    char pipename[MAX_PATH_LEN];
+                    TCHAR pipename[MAX_PATH_LEN];
                     get_audio_pipe_name(pipename, _countof(pipename), i_aud);
-                    sprintf_s(cmd + strlen(cmd), nSize - strlen(cmd), " -i \"%s\"", pipename);
+                    _stprintf_s(cmd + _tcslen(cmd), nSize - _tcslen(cmd), _T(" -i \"%s\""), pipename);
                 }
                 if (pe->aud_count > 0) {
                     const CONF_AUDIO_BASE *cnf_aud = &conf->aud.in;
                     const AUDIO_SETTINGS *aud_stg = &sys_dat->exstg->s_aud_int[cnf_aud->encoder];
                     if (sys_dat->exstg->is_faw(aud_stg)) {
-                        sprintf_s(cmd + strlen(cmd), nSize - strlen(cmd), " -c:a copy");
-                    } else if (strcmp(aud_stg->codec, "custom") != 0) { // custom 選択時は特に何も指定しない
-                        sprintf_s(cmd + strlen(cmd), nSize - strlen(cmd), " -c:a %s", aud_stg->codec);
+                        _stprintf_s(cmd + _tcslen(cmd), nSize - _tcslen(cmd), _T(" -c:a copy"));
+                    } else if (_tcscmp(aud_stg->codec, _T("custom")) != 0) { // custom 選択時は特に何も指定しない
+                        _stprintf_s(cmd + _tcslen(cmd), nSize - _tcslen(cmd), _T(" -c:a %s"), aud_stg->codec);
                         if (aud_stg->mode[cnf_aud->enc_mode].bitrate) {
-                            sprintf_s(cmd + strlen(cmd), nSize - strlen(cmd), " -b:a %dk", cnf_aud->bitrate);
+                            _stprintf_s(cmd + _tcslen(cmd), nSize - _tcslen(cmd), _T(" -b:a %dk"), cnf_aud->bitrate);
                         }
                     }
                 }
             } else {
-                char tmp[MAX_PATH_LEN];
+                TCHAR tmp[MAX_PATH_LEN];
                 get_aud_filename(tmp, _countof(tmp), pe, 0);
-                sprintf_s(cmd + strlen(cmd), nSize - strlen(cmd), " -i \"%s\"", tmp);
+                _stprintf_s(cmd + _tcslen(cmd), nSize - _tcslen(cmd), _T(" -i \"%s\""), tmp);
             }
         }
     }
@@ -252,12 +253,12 @@ static void build_full_cmd(char *cmd, size_t nSize, const CONF_GUIEX *conf, cons
     /////////  vframesを指定すると音声の最後の数秒が切れる場合があるようなので、vfrmaesは指定しない /////////
     //1pass目でafsでない、-vframesがなければ-vframesを指定
     //if ((!prm.vid.afs) && strstr(cmd, "-vframes") == NULL)
-    //	sprintf_s(cmd + strlen(cmd), nSize - strlen(cmd), " -vframes %d", oip->n - pe->drop_count);
+    //	_stprintf_s(cmd + _tcslen(cmd), nSize - _tcslen(cmd), " -vframes %d", oip->n - pe->drop_count);
     //自動2pass
     if (conf->enc.use_auto_npass)
-        sprintf_s(cmd + strlen(cmd), nSize - strlen(cmd), " -pass %d", pe->current_x264_pass);
+        _stprintf_s(cmd + _tcslen(cmd), nSize - _tcslen(cmd), _T(" -pass %d"), pe->current_pass);
     //出力ファイル
-    sprintf_s(cmd + strlen(cmd), nSize - strlen(cmd), " \"%s\"", pe->temp_filename);
+    _stprintf_s(cmd + _tcslen(cmd), nSize - _tcslen(cmd), _T(" \"%s\""), pe->temp_filename);
 }
 
 static void set_pixel_data(CONVERT_CF_DATA *pixel_data, const CONF_GUIEX *conf, int w, int h) {
@@ -288,6 +289,10 @@ static void set_pixel_data(CONVERT_CF_DATA *pixel_data, const CONF_GUIEX *conf, 
             pixel_data->count = 1;
             pixel_data->size[0] = w * h * 4 * sizeof(BYTE); //8bit only
             break;
+        case OUT_CSP_RGBA_16: //RGBA packed 16bit
+            pixel_data->count = 1;
+            pixel_data->size[0] = w * h * 4 * sizeof(short);
+            break;
         case OUT_CSP_NV12: //nv12 (YUV420)
         case OUT_CSP_P010:
         default:
@@ -315,7 +320,7 @@ AUO_RESULT aud_parallel_task(const OUTPUT_INFO *oip, PRM_ENC *pe, BOOL use_inter
         //---   排他ブロック 開始  ---> 音声スレッドが止まっていなければならない
         if (aud_p->he_vid_start && WaitForSingleObject(aud_p->he_vid_start, (use_internal) ? 0 : INFINITE) == WAIT_OBJECT_0) {
             if (aud_p->he_vid_start && aud_p->get_length) {
-                DWORD required_buf_size = aud_p->get_length * (DWORD)oip->audio_size;
+                DWORD required_buf_size = aud_p->get_length * (DWORD)get_audio_size(oip, 1);
                 if (aud_p->buf_max_size < required_buf_size) {
                     //メモリ不足なら再確保
                     if (aud_p->buffer) free(aud_p->buffer);
@@ -325,14 +330,14 @@ AUO_RESULT aud_parallel_task(const OUTPUT_INFO *oip, PRM_ENC *pe, BOOL use_inter
                 }
                 void *data_ptr = NULL;
                 if (NULL == aud_p->buffer ||
-                    NULL == (data_ptr = oip->func_get_audio(aud_p->start, aud_p->get_length, &aud_p->get_length))) {
+                    NULL == (data_ptr = oip_func_get_audio(oip, aud_p->start, aud_p->get_length, &aud_p->get_length, 1))) {
                     ret = AUO_RESULT_ERROR; //mallocエラーかget_audioのエラー
                 } else {
                     //自前のバッファにコピーしてdata_ptrが破棄されても良いようにする
-                    memcpy(aud_p->buffer, data_ptr, aud_p->get_length * oip->audio_size);
+                    memcpy(aud_p->buffer, data_ptr, aud_p->get_length * (DWORD)get_audio_size(oip, 1));
                 }
                 //すでにTRUEなら変更しないようにする
-                aud_p->abort |= oip->func_is_abort();
+                aud_p->abort |= (oip->func_is_abort() ? TRUE : FALSE);
             }
             flush_audio_log();
             if_valid_set_event(aud_p->he_aud_start);
@@ -375,7 +380,7 @@ static AUO_RESULT exit_audio_parallel_control(const OUTPUT_INFO *oip, PRM_ENC *p
                 set_window_title(g_auo_mes.get(AUO_VIDEO_AUDIO_PROC_WAIT), PROGRESSBAR_MARQUEE);
                 wait_for_audio = !wait_for_audio;
             }
-            pe->aud_parallel.abort |= oip->func_is_abort();
+            pe->aud_parallel.abort |= (oip->func_is_abort() ? TRUE : FALSE);
             log_process_events();
         }
         flush_audio_log();
@@ -456,18 +461,18 @@ static void error_videnc_failed(const PRM_ENC *pe) {
     ULARGE_INTEGER temp_drive_avail_space = { 0 };
     const uint64_t disk_warn_threshold = 4 * 1024 * 1024; //4MB
     //指定されたドライブが存在するかどうか
-    char temp_root[MAX_PATH_LEN];
+    TCHAR temp_root[MAX_PATH_LEN];
     if (PathGetRoot(pe->temp_filename, temp_root, _countof(temp_root))
         && PathIsDirectory(temp_root)
         && GetDiskFreeSpaceEx(temp_root, &temp_drive_avail_space, NULL, NULL)
         && temp_drive_avail_space.QuadPart <= disk_warn_threshold) {
-        char driveLetter[MAX_PATH_LEN];
-        strcpy_s(driveLetter, temp_root);
-        if (strlen(driveLetter) > 1 && driveLetter[strlen(driveLetter) - 1] == '\\') {
-            driveLetter[strlen(driveLetter) - 1] = '\0';
+        TCHAR driveLetter[MAX_PATH_LEN];
+        _tcscpy_s(driveLetter, temp_root);
+        if (_tcslen(driveLetter) > 1 && driveLetter[_tcslen(driveLetter) - 1] == '\\') {
+            driveLetter[_tcslen(driveLetter) - 1] = '\0';
         }
-        if (strlen(driveLetter) > 1 && driveLetter[strlen(driveLetter) - 1] == ':') {
-            driveLetter[strlen(driveLetter) - 1] = '\0';
+        if (_tcslen(driveLetter) > 1 && driveLetter[_tcslen(driveLetter) - 1] == ':') {
+            driveLetter[_tcslen(driveLetter) - 1] = '\0';
         }
         error_videnc_dead_and_nodiskspace(driveLetter, temp_drive_avail_space.QuadPart);
     } else {
@@ -476,8 +481,8 @@ static void error_videnc_failed(const PRM_ENC *pe) {
 }
 
 static BOOL get_exedit_file_mapping(ExeditFileMapping* efm) {
-    char name[256];
-    wsprintf(name, "exedit_%d_%d", '01', GetCurrentProcessId());
+    TCHAR name[256];
+    _stprintf_s(name, _countof(name), _T("exedit_%d_%d"), '01', GetCurrentProcessId());
     HANDLE hfmo = OpenFileMapping(FILE_MAP_WRITE, FALSE, name);
     if (hfmo == nullptr)
         return FALSE;
@@ -499,10 +504,10 @@ static AUO_RESULT ffmpeg_out(CONF_GUIEX *conf, const OUTPUT_INFO *oip, PRM_ENC *
     PIPE_SET pipes = { 0 };
     PROCESS_INFORMATION pi_enc = { 0 };
 
-    char enc_cmd[MAX_CMD_LEN]  = { 0 };
-    char enc_args[MAX_CMD_LEN] = { 0 };
-    char enc_dir[MAX_PATH_LEN] = { 0 };
-    char *enc_path = sys_dat->exstg->s_local.ffmpeg_path;
+    TCHAR enc_cmd[MAX_CMD_LEN]  = { 0 };
+    TCHAR enc_args[MAX_CMD_LEN] = { 0 };
+    TCHAR enc_dir[MAX_PATH_LEN] = { 0 };
+    TCHAR *enc_path = sys_dat->exstg->s_enc.fullpath;
 
     const bool afs = conf->vid.afs != 0;
     video_output_thread_t thread_data = { 0 };
@@ -523,8 +528,8 @@ static AUO_RESULT ffmpeg_out(CONF_GUIEX *conf, const OUTPUT_INFO *oip, PRM_ENC *
     }
     PathGetDirectory(enc_dir, _countof(enc_dir), enc_path);
 
-    if (is_aviutl2() && conf->enc.output_csp == OUT_CSP_RGBA) {
-        conf->enc.output_csp = OUT_CSP_RGB;
+    if (!is_aviutl2() && conf->enc.output_csp == OUT_CSP_RGBA_16) {
+        conf->enc.output_csp = OUT_CSP_RGBA;
     }
     const int color_format = get_aviutl_color_format(conf->enc.use_highbit_depth, conf->enc.output_csp);
     const DWORD aviutl_fourcc = COLORFORMATS[color_format].FOURCC;
@@ -535,6 +540,8 @@ static AUO_RESULT ffmpeg_out(CONF_GUIEX *conf, const OUTPUT_INFO *oip, PRM_ENC *
         convert_func_output_csp = OUT_CSP_NV12;
     } else if (convert_func_output_csp == OUT_CSP_YUV444_16) {
         convert_func_output_csp = OUT_CSP_YUV444;
+    } else if (convert_func_output_csp == OUT_CSP_RGBA_16) {
+        convert_func_output_csp = OUT_CSP_RGBA;
     }
     const func_convert_frame convert_frame = get_convert_func(oip->w, color_format, conf->enc.use_highbit_depth ? 16 : 8, conf->enc.interlaced, convert_func_output_csp);
     if (convert_frame == NULL) {
@@ -550,7 +557,7 @@ static AUO_RESULT ffmpeg_out(CONF_GUIEX *conf, const OUTPUT_INFO *oip, PRM_ENC *
     //拡張編集のファイルマッピングを取得
     ExeditFileMapping efm = { nullptr };
     ExeditData ed = { 0 };
-    if(conf->enc.output_csp == OUT_CSP_RGBA) {
+    if (!is_aviutl2() && conf->enc.output_csp == OUT_CSP_RGBA) {
         if (get_exedit_file_mapping(&efm) == FALSE) {
             ret |= AUO_RESULT_ERROR; error_get_exedit_file_mapping();
             return ret;
@@ -571,7 +578,7 @@ static AUO_RESULT ffmpeg_out(CONF_GUIEX *conf, const OUTPUT_INFO *oip, PRM_ENC *
     build_full_cmd(enc_cmd, _countof(enc_cmd), conf, oip, pe, sys_dat, PIPE_FN);
     write_log_auo_line(LOG_INFO, L"ffmpeg options...");
     write_args(enc_cmd);
-    sprintf_s(enc_args, _countof(enc_args), "\"%s\" %s", enc_path, enc_cmd);
+    _stprintf_s(enc_args, _countof(enc_args), _T("\"%s\" %s"), enc_path, enc_cmd);
     
     if (afs && (jitter = (int *)calloc(oip->n + 1, sizeof(int))) == NULL) {
         ret |= AUO_RESULT_ERROR; error_malloc_tc();
@@ -614,7 +621,7 @@ static AUO_RESULT ffmpeg_out(CONF_GUIEX *conf, const OUTPUT_INFO *oip, PRM_ENC *
         enable_enc_control(&set_priority, &enc_pause, FALSE, FALSE, tm_vid_enc_start, oip->n);
 
         //------------メインループ------------
-        for (framen = ed.frame_start, i = 0, next_jitter = jitter + 1, pe->drop_count = 0; (conf->enc.output_csp == OUT_CSP_RGBA ? (framen <= ed.frame_end) : (i < oip->n)); i++, framen++, next_jitter++) {
+        for (framen = ed.frame_start, i = 0, next_jitter = jitter + 1, pe->drop_count = 0; ((!is_aviutl2() && conf->enc.output_csp == OUT_CSP_RGBA) ? (framen <= ed.frame_end) : (i < oip->n)); i++, framen++, next_jitter++) {
             //中断を確認
             ret |= (oip->func_is_abort()) ? AUO_RESULT_ABORT : AUO_RESULT_SUCCESS;
 
@@ -627,7 +634,7 @@ static AUO_RESULT ffmpeg_out(CONF_GUIEX *conf, const OUTPUT_INFO *oip, PRM_ENC *
 
             if (!(i & 7)) {
                 //Aviutlの進捗表示を更新
-                oip->func_rest_time_disp(i + oip->n * (pe->current_x264_pass - 1), oip->n * pe->total_x264_pass);
+                oip->func_rest_time_disp(i + oip->n * (pe->current_pass - 1), oip->n * pe->total_pass);
 
                 //x264優先度
                 check_enc_priority(pe->h_p_aviutl, pi_enc.hProcess, set_priority);
@@ -675,7 +682,7 @@ static AUO_RESULT ffmpeg_out(CONF_GUIEX *conf, const OUTPUT_INFO *oip, PRM_ENC *
                 break;
 
 
-            if(conf->enc.output_csp == OUT_CSP_RGBA) {
+            if (!is_aviutl2() && conf->enc.output_csp == OUT_CSP_RGBA) {
                 //拡張編集からフレームをもらう
                 if ((frame = efm.get_image(framen)) == NULL) {
                     ret |= AUO_RESULT_ERROR; error_afs_get_frame();
@@ -689,8 +696,10 @@ static AUO_RESULT ffmpeg_out(CONF_GUIEX *conf, const OUTPUT_INFO *oip, PRM_ENC *
                 }
             }
 
+#if AVIUTL_TARGET_VER == 1
             //コピーフレームフラグ処理
             copy_frame = (i && (oip->func_get_flag(i) & OUTPUT_INFO_FRAME_FLAG_COPYFRAME));
+#endif
 
             drop |= (afs & copy_frame);
 
@@ -707,26 +716,28 @@ static AUO_RESULT ffmpeg_out(CONF_GUIEX *conf, const OUTPUT_INFO *oip, PRM_ENC *
                 SetEvent(thread_data.he_out_fin);
             }
 
+#if AVIUTL_TARGET_VER == 1
             // 「表示 -> セーブ中もプレビュー表示」がチェックされていると
             // func_update_preview() の呼び出しによって func_get_video_ex() の
             // 取得したバッファが書き換えられてしまうので、呼び出し位置を移動 (拡張AVI出力 plus より)
             oip->func_update_preview();
+#endif
         }
         //------------メインループここまで--------------
 
         //書き込みスレッドを終了
         video_output_close_thread(&thread_data, ret);
 
-        //ログウィンドウからのx264制御を無効化
+        //ログウィンドウからのエンコーダ制御を無効化
         disable_enc_control();
 
         //パイプを閉じる
         CloseStdIn(&pipes);
         
-        if(conf->enc.output_csp == OUT_CSP_RGBA)
+        if (!is_aviutl2() && conf->enc.output_csp == OUT_CSP_RGBA)
             efm.output_end();
 
-        if (!ret) oip->func_rest_time_disp(oip->n * pe->current_x264_pass, oip->n * pe->total_x264_pass);
+        if (!ret) oip->func_rest_time_disp(oip->n * pe->current_pass, oip->n * pe->total_pass);
 
         //音声の同時処理を終了させる
         ret |= finish_aud_parallel_task(oip, pe, conf->aud.use_internal, ret);
@@ -768,8 +779,8 @@ static AUO_RESULT ffmpeg_out(CONF_GUIEX *conf, const OUTPUT_INFO *oip, PRM_ENC *
 static void set_window_title_ffmpegout(const PRM_ENC *pe) {
     wchar_t mes[256];
     swprintf_s(mes, _countof(mes), L"%s %s", ENCODER_NAME_W, g_auo_mes.get(AUO_VIDEO_ENCODE));
-    if (pe->total_x264_pass > 1)
-        swprintf_s(mes + wcslen(mes), _countof(mes) - wcslen(mes), L"   %d / %d pass", pe->current_x264_pass, pe->total_x264_pass);
+    if (pe->total_pass > 1)
+        swprintf_s(mes + wcslen(mes), _countof(mes) - wcslen(mes), L"   %d / %d pass", pe->current_pass, pe->total_pass);
     if (pe->aud_parallel.th_aud)
         wcscat_s(mes, _countof(mes), g_auo_mes.get(AUO_VIDEO_AUDIO_ENCODE));
     set_window_title(mes, PROGRESSBAR_CONTINUOUS);
@@ -781,9 +792,9 @@ static AUO_RESULT video_output_inside(CONF_GUIEX *conf, const OUTPUT_INFO *oip, 
     if (pe->video_out_type == VIDEO_OUTPUT_DISABLED)
         return ret;
 
-    for (; !ret && pe->current_x264_pass <= pe->total_x264_pass; pe->current_x264_pass++) {
-        if (pe->current_x264_pass > 1)
-            open_log_window(oip, sys_dat, pe->current_x264_pass, pe->total_x264_pass);
+    for (; !ret && pe->current_pass <= pe->total_pass; pe->current_pass++) {
+        if (pe->current_pass > 1)
+            open_log_window(oip, sys_dat, pe->current_pass, pe->total_pass);
         set_window_title_ffmpegout(pe);
         ret |= ffmpeg_out(conf, oip, pe, sys_dat);
         set_window_title(AUO_FULL_NAME_W, PROGRESSBAR_DISABLED);

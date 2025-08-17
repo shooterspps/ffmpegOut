@@ -48,10 +48,8 @@ typedef struct {
     int   count;       //planarの枚数。packedなら1
     BYTE *data[3];     //planarの先頭へのポインタ
     int   size[3];     //planarのサイズ
-#if ENCODER_X265
     int   w[3], h[3], pitch[3];
     int byte_per_pixel;
-#endif
     int   total_size;  //全planarのサイズの総和
     int   colormatrix; //色空間 (BT601 / BT709)
 } CONVERT_CF_DATA;
@@ -386,5 +384,13 @@ void convert_lw48_to_yuv444_16bit_avx(void *pixel, CONVERT_CF_DATA *pixel_data, 
 void convert_lw48_to_yuv444_16bit_avx2(void *pixel, CONVERT_CF_DATA *pixel_data, const int width, const int height);
 void convert_lw48_to_yuv444_16bit_avx512bw(void *pixel, CONVERT_CF_DATA *pixel_data, const int width, const int height);
 void convert_lw48_to_yuv444_16bit_avx512vbmi(void *pixel, CONVERT_CF_DATA *pixel_data, const int width, const int height);
+
+// PA64 -> RGBA
+void convert_pa64_to_rgba_avx2(void *pixel, CONVERT_CF_DATA *pixel_data, const int width, const int height);
+void convert_pa64_to_rgba_16bit_avx2(void *pixel, CONVERT_CF_DATA *pixel_data, const int width, const int height);
+
+void convert_pa64_to_yuv444_avx2(void *pixel, CONVERT_CF_DATA *pixel_data, const int width, const int height);
+void convert_pa64_to_yuv444_16bit_avx2(void *pixel, CONVERT_CF_DATA *pixel_data, const int width, const int height);
+
 
 #endif //_CONVERT_H_

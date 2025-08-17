@@ -1,0 +1,4 @@
+﻿LIBRARY "ffmpegOut.auo2"
+
+EXPORTS
+    GetOutputPluginTable
